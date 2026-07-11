@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import bcrypt from 'bcryptjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,6 +32,8 @@ async function initializeDatabase() {
       name VARCHAR(20) NOT NULL,
       country VARCHAR(40) NOT NULL,
       clicks BIGINT NOT NULL DEFAULT 0,
+      password_hash TEXT,
+      is_guest BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS clicks (
@@ -41,7 +44,10 @@ async function initializeDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       milestone BOOLEAN NOT NULL DEFAULT FALSE
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE;
     CREATE INDEX IF NOT EXISTS clicks_created_at_idx ON clicks (created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS users_name_unique_idx ON users (LOWER(name));
     INSERT INTO app_stats (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING;
   `);
 }
@@ -70,16 +76,42 @@ const io = new Server(httpServer, { cors: { origin: '*' } });
 io.on('connection', async socket => {
   try { socket.emit('state', await snapshot()); } catch { socket.emit('error-message', 'Datenbank nicht erreichbar.'); }
 
-  socket.on('join', async user => {
-    if (!user?.id || !/^[\p{L}\p{N}_ -]{3,20}$/u.test(user.name || '') || String(user.country || '').length > 40) return;
+  socket.on('register', async ({ name, country, password }, done) => {
+    if (!/^[\p{L}\p{N}_ -]{3,20}$/u.test(name || '') || String(country || '').length > 40 || String(password || '').length < 6) return done?.({ ok: false, error: 'Nickname: 3–20 Zeichen. Passwort: mindestens 6 Zeichen.' });
     try {
-      await pool.query(`INSERT INTO users (id, name, country) VALUES ($1, $2, $3)
-        ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, country = EXCLUDED.country`, [user.id, user.name, user.country || 'Unbekannt']);
+      const id = randomUUID();
+      const hash = await bcrypt.hash(password, 12);
+      await pool.query('INSERT INTO users (id, name, country, password_hash) VALUES ($1, $2, $3, $4)', [id, name.trim(), country || 'Unbekannt', hash]);
+      socket.data.userId = id;
+      done?.({ ok: true, user: { id, name: name.trim(), country } });
       io.emit('state', await snapshot());
-    } catch { socket.emit('error-message', 'Anmeldung fehlgeschlagen.'); }
+    } catch (error) {
+      if (error.code === '23505') {
+        const claimed = await pool.query(`UPDATE users SET password_hash = $1, country = $2
+          WHERE LOWER(name) = LOWER($3) AND password_hash IS NULL RETURNING id, name, country`, [hash, country || 'Unbekannt', name.trim()]);
+        if (claimed.rowCount) {
+          const account = claimed.rows[0]; socket.data.userId = account.id;
+          return done?.({ ok: true, user: account });
+        }
+        return done?.({ ok: false, error: 'Dieser Benutzername ist bereits vergeben.' });
+      }
+      done?.({ ok: false, error: 'Registrierung fehlgeschlagen.' });
+    }
   });
 
-  socket.on('click', async ({ id }) => {
+  socket.on('login', async ({ name, password }, done) => {
+    try {
+      const result = await pool.query('SELECT id, name, country, password_hash FROM users WHERE LOWER(name) = LOWER($1) AND is_guest = FALSE', [String(name || '').trim()]);
+      const account = result.rows[0];
+      if (!account?.password_hash || !(await bcrypt.compare(String(password || ''), account.password_hash))) return done?.({ ok: false, error: 'Nickname oder Passwort ist falsch.' });
+      socket.data.userId = account.id;
+      done?.({ ok: true, user: { id: account.id, name: account.name, country: account.country } });
+    } catch { done?.({ ok: false, error: 'Anmeldung fehlgeschlagen.' }); }
+  });
+
+  socket.on('click', async () => {
+    const id = socket.data.userId;
+    if (!id) return socket.emit('error-message', 'Bitte zuerst anmelden.');
     const now = Date.now();
     const timestamps = (clickLimits.get(socket.id) || []).filter(t => now - t < 60000);
     const lastSecond = timestamps.filter(t => now - t < 1000);
