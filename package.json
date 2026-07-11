@@ -1,0 +1,9 @@
+{
+  "name": "one-world-click",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "dev": "vite", "server": "node server/index.js", "build": "vite build", "start": "node server/index.js" },
+  "dependencies": { "@vitejs/plugin-react": "latest", "cors": "latest", "d3-geo": "latest", "express": "latest", "pg": "latest", "react": "latest", "react-dom": "latest", "socket.io": "latest", "socket.io-client": "latest", "topojson-client": "latest", "world-atlas": "latest" },
+  "devDependencies": { "vite": "latest" }
+}

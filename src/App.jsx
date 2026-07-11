@@ -1,0 +1,42 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { io } from 'socket.io-client';
+import { geoPath, geoNaturalEarth1 } from 'd3-geo';
+import { feature } from 'topojson-client';
+import world from 'world-atlas/countries-110m.json';
+
+const SERVER = import.meta.env.VITE_SERVER_URL || (import.meta.env.PROD ? window.location.origin : 'http://localhost:3001');
+const MILESTONES = [100,500,1000,5000,10000,50000,100000,500000,1000000];
+const countries = feature(world, world.objects.countries).features;
+const project = geoNaturalEarth1().translate([500,250]).scale(170);
+const path = geoPath(project);
+const uid = () => crypto.randomUUID();
+const stored = JSON.parse(localStorage.getItem('owc-user') || 'null');
+const guest = () => ({ id: uid(), name: `Gast_${Math.floor(1000 + Math.random()*9000)}`, country: 'Deutschland' });
+
+function Login({ onJoin }) {
+  const [name, setName] = useState(''); const [country, setCountry] = useState('Deutschland');
+  const submit = e => { e.preventDefault(); if (/^[\p{L}\p{N}_ -]{3,20}$/u.test(name)) onJoin({ id: uid(), name, country }); };
+  return <main className="login"><section className="login-card"><div className="globe">🌍</div><h1>One World Click</h1><p>Echte Klicks. Eine gemeinsame Welt.</p><form onSubmit={submit}><label>Nickname <input autoFocus value={name} onChange={e=>setName(e.target.value)} minLength="3" maxLength="20" placeholder="3–20 Zeichen" required /></label><label>Land <input value={country} onChange={e=>setCountry(e.target.value)} maxLength="40" required /></label><button className="primary">Los geht’s!</button></form><button className="ghost" onClick={()=>onJoin(guest())}>Als Gast fortfahren</button></section></main>;
+}
+
+function WorldMap({ dots, mine }) {
+  return <div className="map-wrap"><svg viewBox="0 0 1000 500" role="img" aria-label="Weltkarte"><rect width="1000" height="500" rx="20" fill="#0c1324"/>{countries.map(c=><path key={c.id} d={path(c)} fill="#1f2a44" stroke="#31415e" strokeWidth=".5"/>)}{dots.map(d => <circle key={d.id} cx={d.x} cy={d.y} r="5" className={d.userId===mine?'dot mine':'dot'} />)}</svg><small>Live-Klicks auf der Weltkarte</small></div>;
+}
+
+function Leaderboard({ leaders, me }) { const sorted = leaders.map((u,i)=>({...u,rank:i+1})); const own = sorted.find(u=>u.id===me.id); return <section className="card"><h2>🏆 Bestenliste</h2>{sorted.length ? sorted.map(u=><div className={'leader '+(u.id===me.id?'you':'')} key={u.id}><b className={'medal m'+u.rank}>{u.rank<=3?['🥇','🥈','🥉'][u.rank-1]:u.rank}</b><i>{u.name[0].toUpperCase()}</i><span>{u.name}<small>{u.country}{u.id===me.id?' · (DU)':''}</small></span><div className="leaderbar"><b style={{width:`${Math.max(6, u.clicks/(sorted[0]?.clicks||1)*100)}%`}}/></div><strong>{u.clicks.toLocaleString('de-DE')}</strong></div>) : <p>Noch keine echten Klicks.</p>}{!own && <p className="muted">Dein Rang erscheint nach dem ersten Klick.</p>}</section>; }
+
+function Feed({ feed, me }) { return <section className="card"><h2>⚡ Live-Feed</h2><div className="feed">{feed.map(f=><div className={'feeditem '+(f.userId===me.id?'own':'')} key={f.id}><b>{f.name}</b> aus {f.country} hat geklickt <time>{f.at}</time></div>)}{!feed.length&&<p>Noch keine Klicks.</p>}</div></section>; }
+
+export default function App() {
+  const [user,setUser] = useState(stored); const [state,setState] = useState({total:0,dayClicks:0,leaders:[],feed:[]});
+  const [dots,setDots] = useState([]); const [blocked,setBlocked] = useState(0); const [tab,setTab] = useState('map'); const [burst,setBurst] = useState([]); const [banner,setBanner] = useState(null); const times = useRef([]); const [rates,setRates] = useState({sec:0,min:0}); const socket = useRef();
+  useEffect(()=>{ if(!user) return; localStorage.setItem('owc-user',JSON.stringify(user)); const s=io(SERVER); socket.current=s; s.emit('join',user); s.on('state',setState); s.on('click', c=>{ setDots(d=>[...d.slice(-49),{...c,x:80+Math.random()*840,y:70+Math.random()*340}]); if(MILESTONES.includes(c.total)){setBanner(`${c.total.toLocaleString('de-DE')} Klicks erreicht!`);setTimeout(()=>setBanner(null),3500);} }); s.on('blocked',({seconds})=>{setBlocked(seconds); let n=seconds; const i=setInterval(()=>{n--;setBlocked(n);if(n<=0)clearInterval(i)},1000)}); return ()=>s.disconnect(); },[user]);
+  useEffect(()=>{const i=setInterval(()=>{const now=Date.now();times.current=times.current.filter(t=>now-t<60000);setRates({sec:times.current.filter(t=>now-t<1000).length,min:times.current.length});},250);return()=>clearInterval(i)},[]);
+  const own = state.leaders.find(x=>x.id===user?.id)?.clicks || 0;
+  const click = useCallback(()=>{const now=Date.now();if(!user||blocked||now-(times.current.at(-1)||0)<120||times.current.filter(t=>now-t<1000).length>=8||times.current.filter(t=>now-t<60000).length>=200)return;times.current.push(now);socket.current?.emit('click',{id:user.id});setBurst(Array.from({length:14},(_,i)=>i));setTimeout(()=>setBurst([]),650); if(navigator.vibrate)navigator.vibrate(8);},[blocked,user]);
+  useEffect(()=>{const k=e=>{if((e.code==='Space'||e.code==='Enter')&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();click()}};addEventListener('keydown',k);return()=>removeEventListener('keydown',k)},[click]);
+  const share=async()=>{const text=`🌍 Ich bin ${user.name} und habe ${own} Mal bei One World Click geklickt! Mach mit!`;try{navigator.share?await navigator.share({title:'One World Click',text}):await navigator.clipboard.writeText(text);alert(navigator.share?'Danke fürs Teilen!':'Text wurde kopiert.')}catch{}};
+  if(!user)return <Login onJoin={setUser}/>;
+  const progress=Math.min(100,state.dayClicks/1000000*100);
+  return <main className="app"><header><div className="brand">🌍 <b>ONE WORLD CLICK</b><small>LIVE</small></div><div className="profile"><i>{user.name[0].toUpperCase()}</i><span>{user.name}<small>{user.country}</small></span></div></header>{banner&&<div className="banner">🎉 {banner}</div>}<section className="hero"><p className="eyebrow">GLOBALE KLICKS · ECHTZEIT</p><div className="counter">{state.total.toLocaleString('de-DE')}</div><p>Jeder echte Klick zählt.</p><div className="button-zone"><button aria-label="Global klicken" className={'world-button '+(blocked?'blocked':'')} onClick={click} disabled={!!blocked}>{blocked?`Warte ${blocked}s`:'KLICK!'}</button>{burst.map(i=><span key={i} className="particle" style={{'--a':`${i*25}deg`,'--c':['#818cf8','#22c55e','#fbbf24','#f97316'][i%4]}}/>)}</div>{blocked&&<p className="warning">Zu schnell – kurzer Cooldown zum Schutz vor Autoklickern.</p>}<button className="share" onClick={share}>↗ Meinen Klick teilen</button></section><section className="stats"><div><small>GESAMTKLICKS</small><b>{state.total.toLocaleString('de-DE')}</b></div><div><small>KLICKS/MIN</small><b>{rates.min}</b></div><div><small>KLICKS/SEK</small><b>{rates.sec}</b></div><div><small>DEINE KLICKS</small><b>{own}</b></div></section><section className="goal card"><div><h2>🎯 Tagesziel</h2><b>{state.dayClicks.toLocaleString('de-DE')} / 1.000.000</b></div><div className="progress"><b style={{width:progress+'%'}}/></div><small>{progress.toFixed(2)} % erreicht</small></section><nav><button onClick={()=>setTab('map')} className={tab==='map'?'active':''}>🗺 Karte</button><button onClick={()=>setTab('leaders')} className={tab==='leaders'?'active':''}>🏆 Rangliste</button><button onClick={()=>setTab('feed')} className={tab==='feed'?'active':''}>⚡ Live-Feed</button></nav>{tab==='map'&&<WorldMap dots={dots} mine={user.id}/>} {tab==='leaders'&&<Leaderboard leaders={state.leaders} me={user}/>} {tab==='feed'&&<Feed feed={state.feed} me={user}/>}<footer>Anti-Cheat aktiv · Mindestabstand 120 ms · maximal 200 Klicks/Minute</footer></main>;
+}
